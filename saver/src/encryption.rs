@@ -4,7 +4,7 @@ use crate::{
     circuit::BitsizeCheckCircuit,
     error::SaverError,
     keygen::{EncryptionKey, PreparedDecryptionKey, PreparedEncryptionKey, SecretKey},
-    saver_groth16, saver_legogroth16,
+    saver_groth16,
     setup::PreparedEncryptionGens,
     utils,
 };
@@ -23,26 +23,18 @@ use ark_std::{
     vec::Vec,
     UniformRand,
 };
-use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 
 use crate::utils::CHUNK_TYPE;
-use dock_crypto_utils::{ff::non_zero_random, serde_utils::*};
+use dock_crypto_utils::ff::non_zero_random;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 /// Ciphertext used with Groth16
-#[serde_as]
-#[derive(
-    Clone, PartialEq, Eq, Debug, CanonicalSerialize, CanonicalDeserialize, Serialize, Deserialize,
-)]
+#[derive(Clone, PartialEq, Eq, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct Ciphertext<E: Pairing> {
-    #[serde_as(as = "ArkObjectBytes")]
     pub X_r: E::G1Affine,
-    #[serde_as(as = "Vec<ArkObjectBytes>")]
     pub enc_chunks: Vec<E::G1Affine>,
-    #[serde_as(as = "ArkObjectBytes")]
     pub commitment: E::G1Affine,
 }
 
@@ -243,16 +235,6 @@ impl<E: Pairing> Encryption<E> {
     }
 
     /// Same as `Self::encrypt_alt` but takes the SNARK verification key instead of the generators used for Elgamal encryption
-    pub fn encrypt_alt_given_snark_vk<R: RngCore>(
-        rng: &mut R,
-        message: &E::ScalarField,
-        ek: &EncryptionKey<E>,
-        snark_vk: &legogroth16::VerifyingKey<E>,
-        chunk_bit_size: u8,
-    ) -> crate::Result<(CiphertextAlt<E>, E::ScalarField)> {
-        let g_i = saver_legogroth16::get_gs_for_encryption(snark_vk);
-        Self::encrypt_alt(rng, message, ek, g_i, chunk_bit_size)
-    }
 
     /// Decrypt the given ciphertext and return the message and a "commitment" to randomness to help in
     /// verifying the decryption without knowledge of secret key. This is "Dec" from algorithm 2 in the paper
@@ -317,19 +299,6 @@ impl<E: Pairing> Encryption<E> {
     ) -> crate::Result<(E::ScalarField, E::G1Affine)> {
         let g_i = saver_groth16::get_gs_for_encryption(snark_vk);
         Self::decrypt_given_pairing_powers(c_0, c, sk, dk, g_i, chunk_bit_size, pairing_powers)
-    }
-
-    /// Same as `Self::decrypt` but takes LegoGroth16's verification key instead of the generators used for Elgamal encryption
-    pub fn decrypt_given_legogroth16_vk(
-        c_0: &E::G1Affine,
-        c: &[E::G1Affine],
-        sk: &SecretKey<E::ScalarField>,
-        dk: impl Into<PreparedDecryptionKey<E>>,
-        snark_vk: &legogroth16::VerifyingKey<E>,
-        chunk_bit_size: u8,
-    ) -> crate::Result<(E::ScalarField, E::G1Affine)> {
-        let g_i = saver_legogroth16::get_gs_for_encryption(snark_vk);
-        Self::decrypt(c_0, c, sk, dk, g_i, chunk_bit_size)
     }
 
     /// Verify that commitment created during encryption opens to the message chunk
@@ -453,18 +422,6 @@ impl<E: Pairing> Encryption<E> {
     }
 
     /// Same as `Self::verify_decryption` but takes LegoGroth16's verification key instead of the generators used for Elgamal encryption
-    pub fn verify_decryption_given_legogroth16_vk(
-        messages: &[CHUNK_TYPE],
-        c_0: &E::G1Affine,
-        c: &[E::G1Affine],
-        nu: &E::G1Affine,
-        dk: impl Into<PreparedDecryptionKey<E>>,
-        snark_vk: &legogroth16::VerifyingKey<E>,
-        gens: impl Into<PreparedEncryptionGens<E>>,
-    ) -> crate::Result<()> {
-        let g_i = saver_legogroth16::get_gs_for_encryption(snark_vk);
-        Self::verify_decryption(messages, c_0, c, nu, dk, g_i, gens)
-    }
 
     /// Decrypt the ciphertext and return each chunk and "commitment" to the randomness
     pub fn decrypt_to_chunks(
@@ -729,44 +686,6 @@ impl<E: Pairing> Ciphertext<E> {
 
 impl<E: Pairing> CiphertextAlt<E> {
     impl_enc_funcs!();
-
-    pub fn decrypt_given_legogroth16_vk(
-        &self,
-        sk: &SecretKey<E::ScalarField>,
-        dk: impl Into<PreparedDecryptionKey<E>>,
-        snark_vk: &legogroth16::VerifyingKey<E>,
-        chunk_bit_size: u8,
-    ) -> crate::Result<(E::ScalarField, E::G1Affine)> {
-        Encryption::decrypt_given_legogroth16_vk(
-            &self.X_r,
-            &self.enc_chunks,
-            sk,
-            dk,
-            snark_vk,
-            chunk_bit_size,
-        )
-    }
-
-    pub fn verify_decryption_given_legogroth16_vk(
-        &self,
-        message: &E::ScalarField,
-        chunk_bit_size: u8,
-        nu: &E::G1Affine,
-        dk: impl Into<PreparedDecryptionKey<E>>,
-        snark_vk: &legogroth16::VerifyingKey<E>,
-        gens: impl Into<PreparedEncryptionGens<E>>,
-    ) -> crate::Result<()> {
-        let decomposed = utils::decompose(message, chunk_bit_size)?;
-        Encryption::verify_decryption_given_legogroth16_vk(
-            &decomposed,
-            &self.X_r,
-            &self.enc_chunks,
-            nu,
-            dk,
-            snark_vk,
-            gens,
-        )
-    }
 }
 
 #[cfg(test)]

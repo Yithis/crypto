@@ -5,8 +5,6 @@ extern crate alloc;
 pub mod aliases;
 pub mod extend_some;
 // TODO: Feature gate this
-#[macro_use]
-pub mod serde_utils;
 pub mod ff;
 pub mod hashing_utils;
 pub mod iter;

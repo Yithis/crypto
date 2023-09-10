@@ -44,7 +44,6 @@ pub mod error;
 #[macro_use]
 pub mod keygen;
 pub mod saver_groth16;
-pub mod saver_legogroth16;
 pub mod setup;
 #[cfg(test)]
 pub mod tests;

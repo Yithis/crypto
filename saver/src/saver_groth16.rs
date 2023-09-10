@@ -1,20 +1,14 @@
 //! Using SAVER with Groth16
-use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, Group, VariableBaseMSM};
+use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, Group};
 use ark_ff::{Field, PrimeField};
 use ark_relations::r1cs::{ConstraintSynthesizer, SynthesisError};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{
     ops::{AddAssign, Mul},
     rand::{Rng, RngCore},
-    string::ToString,
-    vec,
     vec::Vec,
     UniformRand,
 };
-
-use legogroth16::aggregation::{groth16::AggregateProof, srs::VerifierSRS};
-use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 
 use crate::encryption::Ciphertext;
 pub use ark_groth16::{
@@ -22,25 +16,19 @@ pub use ark_groth16::{
     VerifyingKey,
 };
 use dock_crypto_utils::{
-    ff::{non_zero_random, powers, sum_of_powers},
-    randomized_pairing_check::RandomizedPairingChecker,
+    ff::{non_zero_random},
 };
 
 use crate::error::SaverError;
-use dock_crypto_utils::{serde_utils::*, transcript::Transcript};
+
 
 use crate::{keygen::EncryptionKey, setup::EncryptionGens};
 
-#[serde_as]
-#[derive(
-    Clone, Debug, PartialEq, CanonicalSerialize, CanonicalDeserialize, Serialize, Deserialize,
-)]
+#[derive(Clone, Debug, PartialEq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ProvingKey<E: Pairing> {
     /// Groth16's proving key
-    #[serde_as(as = "ArkObjectBytes")]
     pub pk: Groth16ProvingKey<E>,
     /// The element `-gamma * G` in `E::G1`.
-    #[serde_as(as = "ArkObjectBytes")]
     pub gamma_g1: E::G1Affine,
 }
 
@@ -192,86 +180,6 @@ pub fn verify_qap_proof<E: Pairing>(
     Ok(())
 }
 
-pub fn verify_aggregate_proof<E: Pairing, R: Rng, T: Transcript>(
-    ip_verifier_srs: &VerifierSRS<E>,
-    pvk: &PreparedVerifyingKey<E>,
-    proof: &AggregateProof<E>,
-    ciphertexts: &[Ciphertext<E>],
-    rng: &mut R,
-    transcript: &mut T,
-    pairing_check: Option<&mut RandomizedPairingChecker<E>>,
-) -> Result<(), SaverError> {
-    use legogroth16::aggregation::{error::AggregationError, groth16::verifier::verify_tipp_mipp};
-
-    let n = proof.tmipp.gipa.nproofs as usize;
-    assert_eq!(ciphertexts.len(), n);
-
-    if ciphertexts.len() != proof.tmipp.gipa.nproofs as usize {
-        return Err(SaverError::LegoGroth16Error(
-            AggregationError::InvalidProof("ciphertexts len != number of proofs".to_string())
-                .into(),
-        ));
-    }
-
-    // Random linear combination of proofs
-    transcript.append(b"AB-commitment", &proof.com_ab);
-    transcript.append(b"C-commitment", &proof.com_c);
-
-    let r = transcript.challenge_scalar::<E::ScalarField>(b"r-random-fiatshamir");
-
-    let mut c = RandomizedPairingChecker::new_using_rng(rng, true);
-    let checker = pairing_check.unwrap_or(&mut c);
-
-    let ver_srs_proj = ip_verifier_srs.to_projective();
-    verify_tipp_mipp::<E, T>(
-        &ver_srs_proj,
-        proof,
-        &r, // we give the extra r as it's not part of the proof itself - it is simply used on top for the groth16 aggregation
-        transcript,
-        checker,
-    )
-    .map_err(|e| SaverError::LegoGroth16Error(e.into()))?;
-
-    let r_powers = powers(&r, n);
-    let r_sum = sum_of_powers::<E::ScalarField>(&r, n);
-
-    let mut source1 = Vec::with_capacity(3);
-    let mut source2 = Vec::with_capacity(3);
-
-    let alpha_g1_r_sum = &pvk.vk.alpha_g1.mul(r_sum);
-    source1.push(alpha_g1_r_sum.into_affine());
-    source2.push(pvk.vk.beta_g2);
-
-    source1.push(proof.z_c);
-    source2.push(pvk.vk.delta_g2);
-
-    let mut bases = vec![pvk.vk.gamma_abc_g1[0]];
-    let mut scalars = vec![r_sum.into_bigint()];
-    for (i, p) in r_powers.into_iter().enumerate() {
-        let mut d = ciphertexts[i].X_r.into_group();
-        for c in ciphertexts[i].enc_chunks.iter() {
-            d.add_assign(c.into_group())
-        }
-        bases.push(d.into_affine());
-        scalars.push(p.into_bigint());
-    }
-
-    source1.push(E::G1::msm_bigint(&bases, &scalars).into_affine());
-    source2.push(pvk.vk.gamma_g2);
-
-    checker.add_multiple_sources_and_target(&source1, &source2, &proof.z_ab);
-
-    match checker.verify() {
-        true => Ok(()),
-        false => Err(SaverError::LegoGroth16Error(
-            AggregationError::InvalidProof(
-                "Proof Verification Failed due to pairing checks".to_string(),
-            )
-            .into(),
-        ))?,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,7 +193,6 @@ mod tests {
     use ark_bls12_381::Bls12_381;
     use ark_std::rand::{prelude::StdRng, SeedableRng};
     use dock_crypto_utils::transcript::new_merlin_transcript;
-    use legogroth16::aggregation::srs;
     use std::time::Instant;
 
     type Fr = <Bls12_381 as Pairing>::ScalarField;
@@ -476,64 +383,5 @@ mod tests {
         check(4);
         check(8);
         check(16);
-    }
-
-    #[test]
-    fn proof_aggregation() {
-        let chunk_bit_size = 16;
-        let mut rng = StdRng::seed_from_u64(0u64);
-        let enc_gens = EncryptionGens::<Bls12_381>::new_using_rng(&mut rng);
-
-        let (snark_srs, _, ek, _) = setup_for_groth16(&mut rng, chunk_bit_size, &enc_gens).unwrap();
-        let pvk = prepare_verifying_key::<Bls12_381>(&snark_srs.pk.vk);
-
-        let msg_count = 8;
-        let msgs = (0..msg_count)
-            .map(|_| Fr::rand(&mut rng))
-            .collect::<Vec<_>>();
-
-        let mut cts = vec![];
-        let mut proofs = vec![];
-        for i in 0..msg_count {
-            let (ct, _, proof) =
-                Encryption::encrypt_with_proof(&mut rng, &msgs[i], &ek, &snark_srs, chunk_bit_size)
-                    .unwrap();
-            Encryption::verify_ciphertext_commitment(
-                &ct.X_r,
-                &ct.enc_chunks,
-                &ct.commitment,
-                ek.clone(),
-                enc_gens.clone(),
-            )
-            .unwrap();
-
-            verify_proof(&pvk, &proof, &ct).unwrap();
-
-            cts.push(ct);
-            proofs.push(proof);
-        }
-
-        let srs = srs::setup_fake_srs::<Bls12_381, _>(&mut rng, msg_count);
-        let (prover_srs, ver_srs) = srs.specialize(msg_count);
-
-        let mut prover_transcript = new_merlin_transcript(b"test aggregation");
-        let aggregate_proof = legogroth16::aggregation::groth16::aggregate_proofs(
-            prover_srs,
-            &mut prover_transcript,
-            &proofs,
-        )
-        .expect("error in aggregation");
-
-        let mut ver_transcript = new_merlin_transcript(b"test aggregation");
-        verify_aggregate_proof(
-            &ver_srs,
-            &pvk,
-            &aggregate_proof,
-            &cts,
-            &mut rng,
-            &mut ver_transcript,
-            None,
-        )
-        .expect("error in verification");
     }
 }
